@@ -7,7 +7,6 @@ on:
 
   workflow_dispatch:
 
-# GitHub OIDC permissions
 permissions:
   id-token: write
   contents: read
@@ -17,6 +16,7 @@ env:
   AZURE_ACR: azureacicicd2026
   ACR_LOGIN_SERVER: azureacicicd2026.azurecr.io
   ACI_NAME: azure-aci-cicd
+  ACI_DNS_LABEL: azure-aci-cicd
   IMAGE_NAME: azure-aci-cicd-demo
   ACI_PORT: "8080"
 
@@ -27,11 +27,15 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------
       # 1. Checkout source code
+      # --------------------------------------------------
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
       # 2. Login to Azure using GitHub OIDC
+      # --------------------------------------------------
       - name: Azure Login
         uses: azure/login@v2
         with:
@@ -40,48 +44,80 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # --------------------------------------------------
       # 3. Verify Azure login
+      # --------------------------------------------------
       - name: Verify Azure Login
         shell: bash
         run: |
           echo "Azure account:"
           az account show --output table
 
+      # --------------------------------------------------
       # 4. Login to Azure Container Registry
+      # --------------------------------------------------
       - name: Login to Azure Container Registry
         shell: bash
         run: |
           az acr login \
             --name "$AZURE_ACR"
 
+      # --------------------------------------------------
       # 5. Build Docker image
+      # --------------------------------------------------
       - name: Build Docker Image
         shell: bash
         run: |
+          echo "Building Docker image..."
+
           docker build \
             -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}" \
             -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:latest" \
             ./app
 
+      # --------------------------------------------------
       # 6. Push Docker image to ACR
+      # --------------------------------------------------
       - name: Push Docker Image to ACR
         shell: bash
         run: |
+          echo "Pushing image with Git SHA tag..."
+
           docker push \
             "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
+
+          echo "Pushing latest image..."
 
           docker push \
             "$ACR_LOGIN_SERVER/$IMAGE_NAME:latest"
 
-      # 7. Delete existing ACI
+      # --------------------------------------------------
+      # 7. Show images in ACR
+      # --------------------------------------------------
+      - name: Verify ACR Image
+        shell: bash
+        run: |
+          echo "Images in Azure Container Registry:"
+
+          az acr repository show-tags \
+            --name "$AZURE_ACR" \
+            --repository "$IMAGE_NAME" \
+            --output table
+
+      # --------------------------------------------------
+      # 8. Delete existing ACI
+      # --------------------------------------------------
       - name: Delete Existing ACI
         shell: bash
         run: |
+          echo "Checking existing ACI..."
+
           if az container show \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$ACI_NAME" \
-            --output none 2>/dev/null; then
-
+            --output none 2>/dev/null
+          then
+            echo "Existing ACI found."
             echo "Deleting existing ACI..."
 
             az container delete \
@@ -89,15 +125,19 @@ jobs:
               --name "$ACI_NAME" \
               --yes
 
-            echo "Existing ACI deleted."
+            echo "ACI deleted."
           else
             echo "No existing ACI found."
           fi
 
-      # 8. Create new Azure Container Instance
+      # --------------------------------------------------
+      # 9. Deploy new ACI
+      # --------------------------------------------------
       - name: Deploy to Azure Container Instance
         shell: bash
         run: |
+          echo "Creating Azure Container Instance..."
+
           az container create \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$ACI_NAME" \
@@ -105,7 +145,7 @@ jobs:
             --registry-login-server "$ACR_LOGIN_SERVER" \
             --registry-username "${{ secrets.ACR_USERNAME }}" \
             --registry-password "${{ secrets.ACR_PASSWORD }}" \
-            --dns-name-label azure-aci-cicd \
+            --dns-name-label "$ACI_DNS_LABEL" \
             --ports "$ACI_PORT" \
             --os-type Linux \
             --cpu 1 \
@@ -113,42 +153,78 @@ jobs:
             --restart-policy Always \
             --environment-variables PORT=8080
 
-      # 9. Wait briefly for ACI to start
+      # --------------------------------------------------
+      # 10. Wait for container startup
+      # --------------------------------------------------
       - name: Wait for ACI
         shell: bash
         run: |
-          echo "Waiting for ACI to start..."
+          echo "Waiting for Azure Container Instance..."
+
           sleep 20
 
-      # 10. Check ACI status
+      # --------------------------------------------------
+      # 11. Check ACI state
+      # --------------------------------------------------
       - name: Check ACI Status
         shell: bash
         run: |
-          echo "ACI state:"
+          echo "=========================================="
+          echo "ACI STATUS"
+          echo "=========================================="
 
-          az container show \
+          STATE=$(az container show \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$ACI_NAME" \
-            --query instanceView.state \
-            --output tsv
+            --query "instanceView.state" \
+            --output tsv)
 
-      # 11. Show ACI logs
+          echo "ACI State: $STATE"
+
+          if [ "$STATE" != "Running" ]; then
+            echo "ACI is not running."
+            exit 1
+          fi
+
+          echo "ACI is running successfully."
+
+      # --------------------------------------------------
+      # 12. Show container logs
+      # --------------------------------------------------
       - name: Show ACI Logs
         shell: bash
         run: |
+          echo "=========================================="
+          echo "ACI LOGS"
+          echo "=========================================="
+
           az container logs \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --name "$ACI_NAME" || true
 
-      # 12. Get application URL
+      # --------------------------------------------------
+      # 13. Get application URL
+      # --------------------------------------------------
       - name: Get Application URL
         shell: bash
         run: |
-          FQDN=$(az container show \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --name "$ACI_NAME" \
-            --query ipAddress.fqdn \
-            --output tsv)
+          FQDN=$(az container show --resource-group "$AZURE_RESOURCE_GROUP" --name "$ACI_NAME" --query "ipAddress.fqdn" --output tsv)
 
-          echo "=================
-
+          echo "=========================================="
+          echo "AZURE ACI DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+          echo ""
+          echo "ACI Name: $ACI_NAME"
+          echo "ACI State: Running"
+          echo "ACR: $ACR_LOGIN_SERVER"
+          echo "Image: $IMAGE_NAME:${{ github.sha }}"
+          echo ""
+          echo "ACI FQDN:"
+          echo "$FQDN"
+          echo ""
+          echo "Application URL:"
+          echo "http://$FQDN:$ACI_PORT"
+          echo ""
+          echo "Health URL:"
+          echo "http://$FQDN:$ACI_PORT/health"
+          echo "=========================================="
