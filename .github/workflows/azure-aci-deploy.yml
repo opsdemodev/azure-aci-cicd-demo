@@ -1,0 +1,120 @@
+name: Azure ACI CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AZURE_RESOURCE_GROUP: rg-azure-aci-cicd
+  AZURE_ACR: azureacicicd2026
+  ACR_LOGIN_SERVER: azureacicicd2026.azurecr.io
+  ACI_NAME: azure-aci-cicd
+  IMAGE_NAME: azure-aci-cicd-demo
+  ACI_PORT: 8080
+
+jobs:
+
+  build-and-deploy:
+    name: Build and Deploy to Azure ACI
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+
+      # -------------------------------------------------
+      # Checkout
+      # -------------------------------------------------
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # -------------------------------------------------
+      # Azure Login
+      # -------------------------------------------------
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # -------------------------------------------------
+      # Login to ACR
+      # -------------------------------------------------
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login \
+            --name $AZURE_ACR
+
+      # -------------------------------------------------
+      # Docker Build
+      # -------------------------------------------------
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }} \
+            -t $ACR_LOGIN_SERVER/$IMAGE_NAME:latest \
+            ./app
+
+      # -------------------------------------------------
+      # Push Image
+      # -------------------------------------------------
+
+      - name: Push Docker image to ACR
+        run: |
+          docker push \
+            $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}
+
+          docker push \
+            $ACR_LOGIN_SERVER/$IMAGE_NAME:latest
+
+      # -------------------------------------------------
+      # Deploy ACI
+      # -------------------------------------------------
+
+      - name: Deploy to Azure Container Instances
+        run: |
+          az container delete \
+            --resource-group $AZURE_RESOURCE_GROUP \
+            --name $ACI_NAME \
+            --yes || true
+
+          az container create \
+            --resource-group $AZURE_RESOURCE_GROUP \
+            --name $ACI_NAME \
+            --image $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }} \
+            --registry-login-server $ACR_LOGIN_SERVER \
+            --registry-username ${{ secrets.ACR_USERNAME }} \
+            --registry-password ${{ secrets.ACR_PASSWORD }} \
+            --dns-name-label azure-aci-cicd \
+            --ports $ACI_PORT \
+            --os-type Linux \
+            --cpu 1 \
+            --memory 1.5 \
+            --restart-policy Always \
+            --environment-variables PORT=8080
+
+      # -------------------------------------------------
+      # Get ACI URL
+      # -------------------------------------------------
+
+      - name: Get ACI application URL
+        run: |
+          FQDN=$(az container show \
+            --resource-group $AZURE_RESOURCE_GROUP \
+            --name $ACI_NAME \
+            --query ipAddress.fqdn \
+            --output tsv)
+
+          echo "Application URL:"
+          echo "http://$FQDN:$ACI_PORT"
+
+          echo "Health URL:"
+          echo "http://$FQDN:$ACI_PORT/health"
